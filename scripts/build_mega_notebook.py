@@ -48,6 +48,11 @@ except ImportError:
 if IN_COLAB:
     %pip install -q geemap
 
+import os
+# Guardamos la llave de Maps para la sección 15 y la ocultamos de geemap:
+# si geemap la ve, intenta usar los mosaicos de Google como mapa base y falla.
+MAPS_KEY = os.environ.pop("GOOGLE_MAPS_API_KEY", None) or globals().get("MAPS_KEY")  # sobrevive si re-corres esta celda
+
 import ee, geemap, requests, json
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -186,16 +191,19 @@ pop = (ee.ImageCollection("WorldPop/GP/100m/pop")
 total = pop.reduceRegion(ee.Reducer.sum(), CDMX, 100, maxPixels=1e10).get("population").getInfo()
 print(f"Población estimada CDMX 2020 (WorldPop): {total:,.0f}")
 
-m = mapa(zoom=12, center=CENTRO_LATLON)
+m = mapa(zoom=10)
 m.addLayer(pop.clip(VALLE), {"min": 0, "max": 300, "palette": ["#fff5eb", "#fd8d3c", "#7f2704"]}, "Población por 100 m")
-try:
-    zona = CENTRO.buffer(1500)
-    edif = (ee.FeatureCollection("GOOGLE/Research/open-buildings/v3/polygons")
-            .filterBounds(zona).filter(ee.Filter.gte("confidence", 0.75)))
-    print("Edificios en 1.5 km alrededor del Zócalo:", edif.size().getInfo())
-    m.addLayer(edif, {"color": "cyan"}, "Open Buildings (Centro)")
-except Exception as e:
-    print("Open Buildings no disponible aquí:", str(e)[:150])
+m
+""")
+code("""
+# Open Buildings: contornos de edificios detectados con IA, vistos de cerca sobre imagen satelital
+zona = CENTRO.buffer(1500)
+edif = (ee.FeatureCollection("GOOGLE/Research/open-buildings/v3/polygons")
+        .filterBounds(zona).filter(ee.Filter.gte("confidence", 0.75)))
+print("Edificios en 1.5 km alrededor del Zócalo:", edif.size().getInfo())
+m = geemap.Map(center=list(CENTRO_LATLON), zoom=17)
+m.add_basemap("Esri.WorldImagery")
+m.addLayer(edif.style(color="00FFFF", fillColor="00FFFF22", width=1), {}, "Open Buildings")
 m
 """)
 
@@ -206,8 +214,11 @@ Radiancia nocturna mensual (~500 m). Proxy de actividad económica y urbanizaci�
 code("""
 viirs = (ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG")
          .filterDate("2024-01-01", "2024-12-31").select("avg_rad").median().clip(VALLE))
+# Escala logarítmica: el centro llega a ~150 nW/cm²/sr y las afueras a <1; en escala lineal todo se satura.
+viirs_log = viirs.max(0).add(1).log10()
 m = mapa(zoom=9)
-m.addLayer(viirs, {"min": 0, "max": 60, "palette": ["000000", "1d4877", "f68838", "fbde44", "ffffff"]}, "Luces nocturnas 2024")
+m.addLayer(viirs_log, {"min": 0, "max": 2.4, "palette": ["000000", "1d4877", "f68838", "fbde44", "ffffff"]}, "Luces nocturnas 2024 (log)")
+m.add_colorbar({"min": 0, "max": 2.4, "palette": ["000000", "1d4877", "f68838", "fbde44", "ffffff"]}, label="log10(radiancia + 1)")
 m
 """)
 
@@ -231,7 +242,9 @@ no2_img = no2.filterDate("2024-01-01", "2024-12-31").select("tropospheric_NO2_co
 aod = (ee.ImageCollection("MODIS/061/MCD19A2_GRANULES").filterDate("2024-01-01", "2024-05-31")
        .select("Optical_Depth_055").mean().multiply(0.001).clip(VALLE))
 m = mapa(zoom=9)
-m.addLayer(no2_img, {"min": 0, "max": 0.00015, "palette": ["black", "blue", "purple", "cyan", "green", "yellow", "red"]}, "NO₂ 2024")
+vis_no2 = {"min": 0.00003, "max": 0.0003, "palette": ["black", "blue", "purple", "cyan", "green", "yellow", "red"]}
+m.addLayer(no2_img, vis_no2, "NO₂ 2024")
+m.add_colorbar(vis_no2, label="NO₂ troposférico (mol/m²)")
 m.addLayer(aod, {"min": 0.1, "max": 0.6, "palette": ["#ffffcc", "#fd8d3c", "#800026"]}, "AOD ene–may 2024", False)
 m
 """)
@@ -377,7 +390,11 @@ def overpass(q):
 els = overpass(q)
 
 def tipo(t):
-    return t.get("amenity") or ("estación" if t.get("public_transport") == "station" else "parada de autobús")
+    if t.get("public_transport") == "station":
+        return "estación"
+    if t.get("highway") == "bus_stop":
+        return "parada de autobús"
+    return {"hospital": "hospital", "school": "escuela", "marketplace": "mercado", "library": "biblioteca"}.get(t.get("amenity"), "otro")
 rows = []
 for e in els:
     la, lo = (e["lat"], e["lon"]) if "lat" in e else (e["center"]["lat"], e["center"]["lon"])
@@ -386,11 +403,13 @@ df_osm = pd.DataFrame(rows)
 print(f"Elementos en {radio/1000:.0f} km del centro:")
 print(df_osm["tipo"].value_counts().to_string())
 
-colores = {"hospital": "red", "school": "blue", "marketplace": "orange", "library": "purple", "estación": "black", "parada de autobús": "green"}
+colores = {"hospital": "#e41a1c", "escuela": "#377eb8", "mercado": "#ff7f00", "biblioteca": "#984ea3",
+           "estación": "#000000", "parada de autobús": "#4daf4a", "otro": "#999999"}
 m = geemap.Map(center=list(CENTRO_LATLON), zoom=15)
 for t, sub in df_osm.groupby("tipo"):
     fc = ee.FeatureCollection([ee.Feature(ee.Geometry.Point([x.lon, x.lat]), {"tipo": t}) for x in sub.itertuples()])
-    m.addLayer(fc.style(color=colores.get(t, "gray"), pointSize=4, width=1), {}, f"{t} ({len(sub)})")
+    m.addLayer(fc.style(color=colores[t], pointSize=4, width=1), {}, f"{t} ({len(sub)})")
+m.add_legend(title="OpenStreetMap", legend_dict={f"{t} ({n})": colores[t] for t, n in df_osm["tipo"].value_counts().items()})
 m
 """)
 
@@ -403,9 +422,8 @@ Necesita una **llave de API** con estas APIs habilitadas en el proyecto: Geocodi
 Sin llave, estas celdas se saltan. Recuerda: **ver sí, guardar o entrenar no.**
 """)
 code("""
-import os
 from IPython.display import Image, display
-KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
+KEY = MAPS_KEY
 if IN_COLAB and not KEY:
     try:
         from google.colab import userdata
@@ -413,6 +431,14 @@ if IN_COLAB and not KEY:
     except Exception:
         KEY = None
 print("Llave de Maps:", "encontrada" if KEY else "NO encontrada → se saltan las celdas de Maps")
+
+def ver_imagen(url, params):
+    \"\"\"Descarga y muestra la imagen sin dejar la URL (con la llave) guardada en el notebook.\"\"\"
+    r = requests.get(url, params={**params, "key": KEY}, timeout=30)
+    if r.ok and r.headers.get("content-type", "").startswith("image"):
+        display(Image(data=r.content))
+    else:
+        print("Error", r.status_code, r.text[:200])
 """)
 code("""
 if KEY:
@@ -429,9 +455,8 @@ if KEY:
 code("""
 if KEY:
     # Vista satelital (solo visualización, no se guarda)
-    url = ("https://maps.googleapis.com/maps/api/staticmap?"
-           f"center={PUNTO[0]},{PUNTO[1]}&zoom=18&size=640x640&maptype=satellite&key={KEY}")
-    display(Image(url=url))
+    ver_imagen("https://maps.googleapis.com/maps/api/staticmap",
+               {"center": f"{PUNTO[0]},{PUNTO[1]}", "zoom": 18, "size": "640x640", "maptype": "satellite"})
 """)
 code("""
 if KEY:
@@ -441,7 +466,8 @@ if KEY:
     print("Street View:", meta.get("status"), meta.get("date"))
     if meta.get("status") == "OK":
         for h in (0, 90, 180, 270):
-            display(Image(url=f"https://maps.googleapis.com/maps/api/streetview?size=600x300&location={PUNTO[0]},{PUNTO[1]}&heading={h}&fov=90&key={KEY}"))
+            ver_imagen("https://maps.googleapis.com/maps/api/streetview",
+                       {"size": "600x300", "location": f"{PUNTO[0]},{PUNTO[1]}", "heading": h, "fov": 90})
 """)
 code("""
 if KEY:
@@ -449,7 +475,10 @@ if KEY:
     aq = requests.post(f"https://airquality.googleapis.com/v1/currentConditions:lookup?key={KEY}",
                        json={"location": {"latitude": CENTRO_LATLON[0], "longitude": CENTRO_LATLON[1]},
                              "extraComputations": ["POLLUTANT_CONCENTRATION", "LOCAL_AQI"]}).json()
-    print(json.dumps({k: aq.get(k) for k in ("dateTime", "indexes")}, ensure_ascii=False, indent=1)[:1200])
+    print("Hora (UTC):", aq.get("dateTime"))
+    for i in aq.get("indexes", []):
+        print(f"  {i['displayName']}: {i.get('aqiDisplay', '-')} · {i.get('category')} · contaminante dominante: {i.get('dominantPollutant')}")
+    print("Concentraciones:")
     for p in aq.get("pollutants", []):
         print(f"  {p['displayName']:>6}: {p['concentration']['value']} {p['concentration']['units']}")
 """)
