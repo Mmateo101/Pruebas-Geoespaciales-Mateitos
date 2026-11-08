@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+data/
+*.tif
+*.geojson
+# Credenciales: nunca al repo
+*.json.key
+*-key.json
+service-account*.json
+application_default_credentials.json
+.env
