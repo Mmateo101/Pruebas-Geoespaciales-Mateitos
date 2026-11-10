@@ -376,18 +376,23 @@ out center;'''
 def overpass(q):
     \"\"\"Prueba varios servidores públicos de Overpass (a veces están saturados).\"\"\"
     servidores = ["https://overpass-api.de/api/interpreter",
-                  "https://overpass.kumi.systems/api/interpreter",
-                  "https://overpass.private.coffee/api/interpreter"]
+                  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+                  "https://overpass.private.coffee/api/interpreter",
+                  "https://overpass.kumi.systems/api/interpreter"]
     for url in servidores:
         try:
-            r = requests.post(url, data={"data": q}, headers={"User-Agent": "pruebas-geoespaciales-notebook"}, timeout=90)
+            r = requests.post(url, data={"data": q}, headers={"User-Agent": "pruebas-geoespaciales-notebook"}, timeout=30)
             r.raise_for_status()
             return r.json()["elements"]
         except Exception as e:
             print(f"  {url.split('/')[2]} falló ({str(e)[:60]}), probando otro…")
-    raise RuntimeError("Ningún servidor de Overpass respondió; intenta en unos minutos.")
+    return None
 
 els = overpass(q)
+if els is None:
+    # No detenemos el notebook: el resto de las secciones no depende de OSM.
+    print("⚠️ Ningún servidor público de Overpass respondió ahora. Re-corre esta celda en unos minutos.")
+    els = []
 
 def tipo(t):
     if t.get("public_transport") == "station":
@@ -399,9 +404,9 @@ rows = []
 for e in els:
     la, lo = (e["lat"], e["lon"]) if "lat" in e else (e["center"]["lat"], e["center"]["lon"])
     rows.append({"lat": la, "lon": lo, "tipo": tipo(e.get("tags", {})), "nombre": e.get("tags", {}).get("name")})
-df_osm = pd.DataFrame(rows)
+df_osm = pd.DataFrame(rows, columns=["lat", "lon", "tipo", "nombre"])
 print(f"Elementos en {radio/1000:.0f} km del centro:")
-print(df_osm["tipo"].value_counts().to_string())
+print(df_osm["tipo"].value_counts().to_string() if len(df_osm) else "  (sin datos)")
 
 colores = {"hospital": "#e41a1c", "escuela": "#377eb8", "mercado": "#ff7f00", "biblioteca": "#984ea3",
            "estación": "#000000", "parada de autobús": "#4daf4a", "otro": "#999999"}
@@ -409,7 +414,8 @@ m = geemap.Map(center=list(CENTRO_LATLON), zoom=15)
 for t, sub in df_osm.groupby("tipo"):
     fc = ee.FeatureCollection([ee.Feature(ee.Geometry.Point([x.lon, x.lat]), {"tipo": t}) for x in sub.itertuples()])
     m.addLayer(fc.style(color=colores[t], pointSize=4, width=1), {}, f"{t} ({len(sub)})")
-m.add_legend(title="OpenStreetMap", legend_dict={f"{t} ({n})": colores[t] for t, n in df_osm["tipo"].value_counts().items()})
+if len(df_osm):
+    m.add_legend(title="OpenStreetMap", legend_dict={f"{t} ({n})": colores[t] for t, n in df_osm["tipo"].value_counts().items()})
 m
 """)
 
